@@ -283,7 +283,7 @@ export default function ArchitecturalEmblem({ className = '', onReplay, scrollPr
               fontWeight="700"
               letterSpacing="0.22em"
               style={{
-                opacity: Math.min(1, Math.max(0, (progress - 0.76) / 0.14)),
+                opacity: Math.min(1, Math.max(0, (shownProgress - 0.76) / 0.14)),
                 transition: (isPlaying && !externallyControlled) ? 'none' : 'opacity 0.2s ease',
               }}
             >
@@ -312,8 +312,8 @@ export default function ArchitecturalEmblem({ className = '', onReplay, scrollPr
               strokeWidth="2.0"
               style={{
                 strokeDasharray: 1560,
-                strokeDashoffset: 1560 * (1 - Math.min(1, Math.max(0, (progress - 0.86) / 0.12))),
-                transition: isPlaying ? 'none' : 'stroke-dashoffset 0.15s linear',
+                strokeDashoffset: 1560 * (1 - Math.min(1, Math.max(0, (shownProgress - 0.86) / 0.12))),
+                transition: (isPlaying && !externallyControlled) ? 'none' : 'stroke-dashoffset 0.15s linear',
               }}
             />
           </g>
@@ -322,7 +322,7 @@ export default function ArchitecturalEmblem({ className = '', onReplay, scrollPr
 
       {/* Subtle Classical Interaction Bar below emblem */}
       <div className="mt-4 flex items-center justify-between gap-4 w-full max-w-[340px] px-2 text-xs text-navy-200/60 font-medium">
-        <button
+        {!externallyControlled && <button
           type="button"
           onClick={handleManualReplay}
           className="group inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/5 px-3 py-1 text-[11px] text-white/80 transition-all hover:border-white/50 hover:bg-white/10 hover:text-white active:scale-95"
@@ -338,7 +338,7 @@ export default function ArchitecturalEmblem({ className = '', onReplay, scrollPr
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
           <span>{t('intro.replay')}</span>
-        </button>
+        </button>}
 
         {/* Minimal progress / status indicator */}
         <div className="flex items-center gap-2">
