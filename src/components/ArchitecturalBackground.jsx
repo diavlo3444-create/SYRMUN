@@ -3,156 +3,195 @@ import { useEffect, useRef } from 'react';
 /**
  * ArchitecturalBackground
  *
- * Synchronizes video playback currentTime directly with page scroll progress:
- * - 0% scroll = 0% video (first frame)
- * - 100% scroll = 100% video (last frame)
- * - Scroll down: advances forward smoothly
- * - Scroll up: reverses backward smoothly
- * - Fast scroll: progresses fast
- * - Slow scroll: progresses slowly
- * - Scrolling stops: freezes immediately at current frame
- * - Fully responsive to touchscreen gestures on mobile (touchmove, scroll, fling)
- * - Desktop: fixed full-screen cinematic backdrop
- * - Mobile: proportionally sized (45vh, max 420px) centered crop with soft bottom fade
+ * Keeps the architectural video scrubbed to the page's real scroll position.
+ * The mobile video viewport is measured from the live visual viewport so it
+ * adapts to portrait/landscape, short screens and the changing mobile browser
+ * chrome. Desktop keeps its original full-screen background composition.
  */
 export default function ArchitecturalBackground() {
   const videoRef = useRef(null);
+  const videoLayerRef = useRef(null);
   const progressBarRef = useRef(null);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return undefined;
+    const videoLayer = videoLayerRef.current;
+    if (!video || !videoLayer) return undefined;
 
-    let rafId = null;
     let duration = 0;
-    let targetTime = 0;
-    let lastSeekTime = 0;
+    let latestTargetTime = 0;
+    let frameRequest = 0;
     let unlocked = false;
 
-    // Configure video attributes
     video.pause();
     video.loop = false;
     video.muted = true;
     video.playsInline = true;
 
-    // Helper: calculate total scroll progress across any device/browser
+    const getViewport = () => {
+      const visualViewport = window.visualViewport;
+      const width = visualViewport?.width || document.documentElement.clientWidth || window.innerWidth;
+      const height = visualViewport?.height || window.innerHeight || document.documentElement.clientHeight;
+      return { width: Math.max(1, width), height: Math.max(1, height) };
+    };
+
+    // The mobile backdrop scales with the actual visible screen, not a fixed
+    // 45vh/min-height rule. Short landscape phones get a shorter cinematic band.
+    const syncViewport = () => {
+      const { width, height } = getViewport();
+      if (width < 768) {
+        const aspect = width / height;
+        const heightFactor = aspect > 1.35 ? 0.40 : width < 380 ? 0.30 : 0.32;
+        const mobileHeight = Math.min(320, Math.max(164, height * heightFactor));
+        videoLayer.style.height = `${Math.round(mobileHeight)}px`;
+        video.style.objectPosition = aspect < 0.58 ? '50% 46%' : '50% 50%';
+      } else {
+        videoLayer.style.height = '';
+        video.style.objectPosition = '50% 50%';
+      }
+
+      scheduleSeek();
+    };
+
     const getScrollProgress = () => {
       const doc = document.documentElement;
       const body = document.body;
-      const scrollTop = window.scrollY || window.pageYOffset || doc.scrollTop || body.scrollTop || 0;
+      const scrollTop = Math.max(0, window.scrollY || window.pageYOffset || doc.scrollTop || body.scrollTop || 0);
       const scrollHeight = Math.max(
         doc.scrollHeight,
         body.scrollHeight,
         doc.offsetHeight,
-        body.offsetHeight,
-        doc.clientHeight
+        body.offsetHeight
       );
-      const clientHeight = window.innerHeight || doc.clientHeight || 1;
-      const maxScroll = Math.max(1, scrollHeight - clientHeight);
+      const viewportHeight = getViewport().height;
+      const maxScroll = Math.max(1, scrollHeight - viewportHeight);
       return Math.min(1, Math.max(0, scrollTop / maxScroll));
     };
 
-    // Update duration & initial target time
-    const syncDuration = () => {
-      if (video.duration && Number.isFinite(video.duration) && video.duration > 0) {
-        duration = video.duration;
-        const p = getScrollProgress();
-        targetTime = p * duration;
+    const updateProgressBar = (progress) => {
+      if (progressBarRef.current) {
+        progressBarRef.current.style.transform = `scaleX(${progress})`;
       }
     };
 
-    // Mobile media unlock: briefly prime the decoder on first user gesture
+    const applyLatestSeek = () => {
+      frameRequest = 0;
+      if (!duration || video.readyState < HTMLMediaElement.HAVE_METADATA) return;
+
+      const progress = getScrollProgress();
+      latestTargetTime = progress * duration;
+      updateProgressBar(progress);
+
+      // Keep only one media seek in flight. When it finishes, seek directly to
+      // the newest scroll position instead of dropping scroll updates on mobile.
+      if (video.seeking) return;
+
+      if (Math.abs(video.currentTime - latestTargetTime) > 0.035) {
+        try {
+          video.currentTime = latestTargetTime;
+        } catch {
+          // Some browsers reject seeks until a media frame is available.
+        }
+      }
+    };
+
+    function scheduleSeek() {
+      if (frameRequest) return;
+      frameRequest = window.requestAnimationFrame(applyLatestSeek);
+    }
+
+    const syncDuration = () => {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        duration = video.duration;
+        scheduleSeek();
+      }
+    };
+
+    const handleSeeked = () => {
+      if (!duration) return;
+      if (Math.abs(video.currentTime - latestTargetTime) > 0.06) {
+        scheduleSeek();
+      }
+    };
+
+    // iOS Safari can require a user gesture before it will decode a paused
+    // video reliably. Prime it once, pause immediately, then continue scrubbing.
     const unlock = () => {
       if (unlocked) return;
       unlocked = true;
       try {
-        const p = video.play();
-        if (p && typeof p.then === 'function') {
-          p.then(() => {
+        const playPromise = video.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+          playPromise.then(() => {
             video.pause();
-          }).catch(() => {});
+            scheduleSeek();
+          }).catch(() => {
+            scheduleSeek();
+          });
         }
-      } catch {}
-    };
-
-    // Immediate seek / smooth step logic
-    const updateVideoFrame = () => {
-      if (!duration) {
-        syncDuration();
-        if (!duration) return;
-      }
-
-      const progress = getScrollProgress();
-      targetTime = progress * duration;
-
-      const now = performance.now();
-      const current = video.currentTime;
-      const diff = targetTime - current;
-      const absDiff = Math.abs(diff);
-
-      // Only seek if difference exceeds threshold and video is ready for next seek
-      if (absDiff > 0.02) {
-        const canSeek = !video.seeking || now - lastSeekTime > 55;
-        if (canSeek) {
-          lastSeekTime = now;
-          // For small adjustments, step smoothly; for larger jumps (fast scroll), move aggressively
-          const step = absDiff < 0.2 ? diff : diff * 0.5;
-          const nextTime = Math.max(0, Math.min(duration, current + step));
-          try {
-            video.currentTime = nextTime;
-          } catch {}
-        }
-      }
-
-      // Update the top progress bar
-      if (progressBarRef.current && duration > 0) {
-        const p = Math.min(1, Math.max(0, video.currentTime / duration));
-        progressBarRef.current.style.transform = `scaleX(${p})`;
+      } catch {
+        scheduleSeek();
       }
     };
 
-    // Animation frame loop
-    const tick = () => {
-      if (!document.hidden) {
-        updateVideoFrame();
-      }
-      rafId = requestAnimationFrame(tick);
+    const handleVisibility = () => {
+      if (!document.hidden) scheduleSeek();
     };
 
-    // Listen to video metadata events
     video.addEventListener('loadedmetadata', syncDuration);
+    video.addEventListener('loadeddata', syncDuration);
     video.addEventListener('durationchange', syncDuration);
     video.addEventListener('canplay', syncDuration);
+    video.addEventListener('seeked', handleSeeked);
 
-    // Initial check
-    if (video.readyState >= 1) syncDuration();
-
-    // Listen to touch and user gestures to prime playback on mobile
+    window.addEventListener('scroll', scheduleSeek, { passive: true });
+    window.addEventListener('resize', syncViewport, { passive: true });
+    window.addEventListener('orientationchange', syncViewport, { passive: true });
     window.addEventListener('touchstart', unlock, { passive: true, once: true });
-    window.addEventListener('touchmove', unlock, { passive: true, once: true });
-    window.addEventListener('scroll', unlock, { passive: true, once: true });
     window.addEventListener('pointerdown', unlock, { passive: true, once: true });
+    document.addEventListener('visibilitychange', handleVisibility);
 
-    // Start RAF loop
-    rafId = requestAnimationFrame(tick);
+    const visualViewport = window.visualViewport;
+    visualViewport?.addEventListener('resize', syncViewport, { passive: true });
+    visualViewport?.addEventListener('scroll', scheduleSeek, { passive: true });
+
+    // Recalculate document scroll range when responsive content changes height.
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(scheduleSeek)
+      : null;
+    if (resizeObserver) {
+      resizeObserver.observe(document.documentElement);
+      resizeObserver.observe(document.body);
+    }
+
+    syncViewport();
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) syncDuration();
 
     return () => {
-      if (rafId) cancelAnimationFrame(rafId);
+      if (frameRequest) window.cancelAnimationFrame(frameRequest);
+      resizeObserver?.disconnect();
       video.removeEventListener('loadedmetadata', syncDuration);
+      video.removeEventListener('loadeddata', syncDuration);
       video.removeEventListener('durationchange', syncDuration);
       video.removeEventListener('canplay', syncDuration);
+      video.removeEventListener('seeked', handleSeeked);
+      window.removeEventListener('scroll', scheduleSeek);
+      window.removeEventListener('resize', syncViewport);
+      window.removeEventListener('orientationchange', syncViewport);
       window.removeEventListener('touchstart', unlock);
-      window.removeEventListener('touchmove', unlock);
-      window.removeEventListener('scroll', unlock);
       window.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      visualViewport?.removeEventListener('resize', syncViewport);
+      visualViewport?.removeEventListener('scroll', scheduleSeek);
     };
   }, []);
 
   return (
     <>
-      {/* Background Video Layer — 45vh max 420px on mobile with soft fade, full-bleed fixed on desktop */}
+      {/* Mobile height is calculated from the live viewport; desktop stays full-screen. */}
       <div
-        className="pointer-events-none fixed top-0 inset-x-0 z-0 h-[45vh] max-h-[420px] min-h-[280px] md:inset-0 md:h-full md:max-h-none overflow-hidden bg-[#02143b]"
+        ref={videoLayerRef}
+        className="pointer-events-none fixed inset-x-0 top-0 z-0 h-[32svh] min-h-[164px] max-h-[320px] overflow-hidden bg-[#02143b] md:inset-0 md:h-full md:min-h-0 md:max-h-none"
         aria-hidden="true"
       >
         <video
@@ -165,14 +204,10 @@ export default function ArchitecturalBackground() {
           className="absolute inset-0 h-full w-full object-cover object-center"
         />
 
-        {/* Mobile bottom-fade scrim to smoothly dissolve video into deep navy background */}
         <div className="absolute inset-0 bg-gradient-to-b from-[#02143b]/20 via-transparent to-[#02143b] md:hidden" />
-
-        {/* Desktop subtle ambient scrim */}
-        <div className="hidden md:block absolute inset-0 bg-gradient-to-b from-[#021133]/25 via-transparent to-[#021133]/35" />
+        <div className="absolute inset-0 hidden bg-gradient-to-b from-[#021133]/25 via-transparent to-[#021133]/35 md:block" />
       </div>
 
-      {/* Top Architectural Blueprint Progress Line */}
       <div className="pointer-events-none fixed inset-x-0 top-0 z-50 h-[2px]" aria-hidden="true">
         <div
           ref={progressBarRef}
